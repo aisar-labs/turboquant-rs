@@ -57,26 +57,31 @@ turboquant-rs/
 
 ## Core Data Types
 
+**Note:** Indices are stored one-per-byte (`Vec<u8>` / `Vec<i8>`) for simplicity. Bit-packing is out of scope for this research implementation.
+
 ```rust
 /// Precomputed codebook for a given bit-width b.
 /// Contains 2^b centroids optimized for the Beta distribution.
 pub struct Codebook {
     pub bit_width: u8,           // b = 1..4
-    pub centroids: Vec<f64>,     // 2^b centroids in [-1, 1]
+    pub centroids: Vec<f64>,     // 2^b sorted centroids in [-1, 1]
     pub boundaries: Vec<f64>,    // 2^b - 1 decision boundaries
 }
 
-/// Result of TurboQuant_mse quantization
+/// Result of TurboQuant_mse quantization.
+/// Tied to the TurboMse instance that produced it — dequantizing with
+/// a different instance (different rotation matrix) produces wrong results.
 pub struct MseQuantized {
-    pub indices: Vec<u8>,        // index per coordinate into codebook
+    pub indices: Vec<u8>,        // one index per coordinate (unpacked, one per byte)
     pub bit_width: u8,
     pub norm: f64,               // ||x||_2, stored separately
 }
 
-/// Result of TurboQuant_prod quantization
+/// Result of TurboQuant_prod quantization.
+/// Tied to the TurboProd instance that produced it.
 pub struct ProdQuantized {
     pub mse_part: MseQuantized,  // (b-1)-bit MSE quantization
-    pub qjl_signs: Vec<i8>,     // sign(S·r), +1 or -1 per dimension
+    pub qjl_signs: Vec<i8>,     // sign(S·r̂), +1 or -1, one per dimension (unpacked)
     pub residual_norm: f64,      // ||r||_2
 }
 ```
@@ -99,15 +104,20 @@ Solves the continuous 1D k-means problem for the Beta distribution of coordinate
 
 **Beta PDF:** `f_X(x) = Γ(d/2) / (√π · Γ((d-1)/2)) · (1 - x²)^((d-3)/2)` for x ∈ [-1, 1]
 
+**Precondition:** `d >= 3`. At d=2 the Beta PDF has a singularity at ±1 (arcsine distribution) causing numerical instability in Simpson's rule. At d=1 the distribution degenerates to point masses. Both `beta_pdf` and `solve` assert `d >= 3`.
+
 **Algorithm:**
 1. Initialize 2^b centroids uniformly in [-1, 1]
 2. Compute decision boundaries as midpoints between adjacent centroids
 3. Update centroids to conditional means: `cᵢ = ∫ x·f(x)dx / ∫ f(x)dx` over region
-4. Repeat until convergence (Δ < 1e-12)
+4. Convergence criterion: Δ = max_k |c_k^(new) - c_k^(old)| < 1e-12
 5. Integrals via Simpson's rule
 
 ```rust
+/// Requires d >= 3. Panics otherwise.
 pub fn solve(d: usize, bit_width: u8, max_iter: usize) -> Codebook
+
+/// Requires d >= 3. Panics otherwise.
 pub fn beta_pdf(x: f64, d: usize) -> f64
 ```
 
@@ -115,8 +125,10 @@ pub fn beta_pdf(x: f64, d: usize) -> f64
 
 Hardcoded tables for b=1..4 at high-d (Gaussian approximation):
 
-| b | Expected MSE | Shannon Lower Bound |
-|---|-------------|-------------------|
+Empirical MSE from Lloyd-Max at d→∞ (Gaussian approximation), verified against paper:
+
+| b | Lloyd-Max MSE | Shannon Lower Bound |
+|---|--------------|-------------------|
 | 1 | 0.3634 | 0.25 |
 | 2 | 0.1175 | 0.0625 |
 | 3 | ~0.03 | 0.0156 |
@@ -130,9 +142,10 @@ pub fn for_dimension(d: usize, bit_width: u8) -> Codebook
 ### turbo_mse.rs — TurboQuant_mse
 
 **Quantization:**
-1. Store `norm = ||x||₂`, normalize `x̂ = x / norm`
-2. Rotate: `y = Π · x̂`
-3. Per coordinate: find nearest centroid index
+1. Store `norm = ||x||₂`. If norm is zero, return zero-filled `MseQuantized` (all indices 0, norm 0.0).
+2. Normalize: `x̂ = x / norm`
+3. Rotate: `y = Π · x̂`
+4. Per coordinate: find nearest centroid via linear scan over centroids (`argmin_k |y_j - c_k|`). On ties, first (lowest index) wins.
 
 **Dequantization:**
 1. Reconstruct: `ỹ_j = centroids[idx_j]`
@@ -169,11 +182,16 @@ impl Qjl {
 
 ### turbo_prod.rs — TurboQuant_prod
 
+**Important:** `TurboProd::new(d, bit_width, seed)` constructs its internal `TurboMse` with `bit_width - 1`, not `bit_width`. The assert `bit_width >= 2` is enforced inside `new`.
+
 **Quantization:**
-1. Apply TurboQuant_mse at (b-1) bits
-2. Compute residual: `r = x - dequantize(mse_part)`
-3. Store `residual_norm = ||r||₂`, normalize `r̂ = r / residual_norm`
-4. Apply QJL: `signs = sign(S · r̂)`
+1. `assert!(bit_width >= 2)` — need at least 1 bit for MSE + 1 bit for QJL
+2. Apply `self.turbo_mse.quantize(x)` — this uses (b-1) bits
+3. Dequantize MSE part: `x̃_mse = self.turbo_mse.dequantize(&mse_part)`
+4. Compute residual: `r = x - x̃_mse`
+5. Store `residual_norm = ||r||₂`. If residual_norm is zero, store zero signs.
+6. Normalize residual: `r̂ = r / residual_norm`
+7. Apply QJL to **normalized** residual: `signs = self.qjl.quantize(&r_hat)` — caller must pass `r̂`, not `r`
 
 **Inner product estimation:**
 ```
@@ -200,18 +218,27 @@ impl TurboProd {
 Control group: divide [min, max] into 2^b uniform bins. Requires storing min/max per block — the overhead TurboQuant eliminates.
 
 ```rust
-pub struct UniformQuantized { indices: Vec<u8>, min: f64, max: f64, bit_width: u8 }
+pub struct UniformQuantized {
+    pub indices: Vec<u8>,  // one index per coordinate (unpacked)
+    pub min: f64,
+    pub max: f64,
+    pub bit_width: u8,
+}
 pub fn quantize(x: &[f64], bit_width: u8) -> UniformQuantized
 pub fn dequantize(q: &UniformQuantized) -> Vec<f64>
 ```
 
 ### distortion.rs — Metrics
 
+**Precondition:** All functions assert matching slice lengths.
+
 ```rust
 pub fn mse_distortion(original: &[Vec<f64>], reconstructed: &[Vec<f64>]) -> f64
 pub fn inner_product_distortion(xs: &[Vec<f64>], ys: &[Vec<f64>], estimates: &[f64]) -> f64
 pub fn shannon_lower_bound(bit_width: u8) -> f64
 pub fn turboquant_mse_upper_bound(bit_width: u8) -> f64
+/// D_prod ≤ (√3·π²·||y||₂²/d) · (1/4^b)
+pub fn turboquant_prod_upper_bound(bit_width: u8, d: usize, y_norm_sq: f64) -> f64
 ```
 
 ## Test Strategy
@@ -232,14 +259,14 @@ pub fn turboquant_mse_upper_bound(bit_width: u8) -> f64
 - TurboQuant MSE distortion within paper's upper bound
 - TurboQuant outperforms naive uniform baseline at every bit-width
 - Distortion decreases ~4× per additional bit
-- Inner product estimator is unbiased (mean error ≈ 0 over 10k samples)
+- Inner product estimator is unbiased: mean absolute error < 0.01 · ||y||₂ over 10k random unit vector pairs
 
 ### Benchmarks
 
 Reproduce paper's distortion table (b=1..4, d=512, 10k random unit vectors):
 
-| b | Expected MSE | Shannon LB | Ratio |
-|---|-------------|-----------|-------|
+| b | Lloyd-Max MSE | Shannon LB | Ratio |
+|---|--------------|-----------|-------|
 | 1 | ~0.3634 | 0.25 | ~1.45 |
 | 2 | ~0.1175 | 0.0625 | ~1.88 |
 | 3 | ~0.03 | 0.0156 | ~1.92 |
