@@ -43,7 +43,7 @@ impl TurboProd {
 
         // Step 4: QJL on NORMALIZED residual
         let qjl_signs = if residual_norm == 0.0 {
-            vec![0i8; x.len()] // Zero signs per spec when residual is zero
+            vec![1i8; x.len()] // Arbitrary valid signs; residual_norm == 0 gates these to zero in estimate
         } else {
             let r_hat: Vec<f64> = residual.iter().map(|v| v / residual_norm).collect();
             self.qjl.quantize(&r_hat)
@@ -55,6 +55,14 @@ impl TurboProd {
     /// Estimate inner product <y, x> from quantized x and full-precision y.
     /// Formula: <y, x_mse> + residual_norm * <y, Q_qjl^{-1}(signs)>
     pub fn estimate_inner_product(&self, y: &[f64], q: &ProdQuantized) -> f64 {
+        assert_eq!(
+            y.len(),
+            q.mse_part.indices.len(),
+            "Dimension mismatch: y has {} elements but quantized vector has {}",
+            y.len(),
+            q.mse_part.indices.len()
+        );
+
         let x_mse = self.turbo_mse.dequantize(&q.mse_part);
         let ip_mse: f64 = y.iter().zip(x_mse.iter()).map(|(a, b)| a * b).sum();
 

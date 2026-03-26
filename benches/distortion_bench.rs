@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, black_box, Criterion};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use rand_distr::{Distribution, StandardNormal};
@@ -36,16 +36,31 @@ fn bench_distortion_table(c: &mut Criterion) {
         println!("{:<5} {:<15.6} {:<15.6} {:<10.4}", b, measured, lb, ratio);
     }
 
-    // Throughput benchmarks
+    // Throughput benchmarks with varied inputs and black_box
     for b in [2u8, 4] {
         let tq = TurboMse::new(d, b, Some(42));
-        let x = random_unit_vector(d, &mut ChaCha20Rng::seed_from_u64(99));
+        let mut bench_rng = ChaCha20Rng::seed_from_u64(99);
+        let bench_vectors: Vec<Vec<f64>> = (0..100)
+            .map(|_| random_unit_vector(d, &mut bench_rng))
+            .collect();
+
         c.bench_function(&format!("turbo_mse_quantize_b{b}_d{d}"), |bench| {
-            bench.iter(|| tq.quantize(&x))
+            let mut i = 0;
+            bench.iter(|| {
+                let x = &bench_vectors[i % bench_vectors.len()];
+                i += 1;
+                black_box(tq.quantize(black_box(x)))
+            })
         });
-        let q = tq.quantize(&x);
+
+        let bench_quantized: Vec<_> = bench_vectors.iter().map(|x| tq.quantize(x)).collect();
         c.bench_function(&format!("turbo_mse_dequantize_b{b}_d{d}"), |bench| {
-            bench.iter(|| tq.dequantize(&q))
+            let mut i = 0;
+            bench.iter(|| {
+                let q = &bench_quantized[i % bench_quantized.len()];
+                i += 1;
+                black_box(tq.dequantize(black_box(q)))
+            })
         });
     }
 }
