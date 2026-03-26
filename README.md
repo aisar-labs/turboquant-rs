@@ -1,8 +1,10 @@
 # TurboQuant-RS
 
+> **This is a research implementation.** It is intended for learning, experimentation, and reproducing the paper's results. It is **not intended for production use.** There are no stability guarantees, no optimized kernels, and no battle-tested error recovery. If you need production quantization, look at established libraries or wait for official implementations.
+
 Rust implementation of [TurboQuant: Redefining AI Efficiency with Extreme Compression](https://arxiv.org/abs/2504.19874) (ICLR 2026, Google Research).
 
-TurboQuant is a data-oblivious vector quantization algorithm that achieves near-optimal compression without training data. This implementation is for research and learning — it prioritizes correctness and clarity over production performance.
+TurboQuant is a data-oblivious vector quantization algorithm that achieves near-optimal compression without training data. This implementation prioritizes correctness and clarity over performance — f64 throughout, no SIMD, no unsafe code.
 
 ## Why TurboQuant Matters
 
