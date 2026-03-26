@@ -166,6 +166,14 @@ Projects a vector through a random Gaussian matrix and takes sign bits. The dequ
 
 where `r = x - x_mse` is the quantization residual and `r_hat = r / ||r||`.
 
+## Roadmap
+
+- [ ] **KV Cache Module** — Compress key-value pairs on-the-fly, compute attention scores directly on compressed data, full softmax + weighted value decoding. TurboProd for keys (unbiased inner products), TurboMse for values (good reconstruction).
+- [ ] **Error Handling** — `Result<T>` returns instead of panics for new modules
+- [ ] **Serde Support** — Serialize/deserialize quantized vectors for persistence and network transport
+- [ ] **Rotation Trait** — Pluggable rotation interface for future SRHT (Structured Random Hadamard Transform, O(d log d) vs current O(d^2))
+- [ ] **SIMD/GPU Kernels** — Optimized quantize/dequantize for production throughput
+
 ## References
 
 - [TurboQuant: Redefining AI Efficiency with Extreme Compression](https://arxiv.org/abs/2504.19874) — Guo, Kang, Li, Xiao, Yu (Google Research, ICLR 2026)
